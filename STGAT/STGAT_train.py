@@ -16,7 +16,6 @@ warnings.filterwarnings("ignore")
 # from Agent_SL import GCN,SGFormer,TCN_Net
 from torch.utils.data import random_split
 from STGAT import GAT_TCN
-from gen_data_tsd import gen_GNN_data
 # from gen_data import gen_GNN_data
 # from GAT import GAT_TCN
 
