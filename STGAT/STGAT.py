@@ -111,11 +111,11 @@ class GAT_TCN(nn.Module):
         self.gat_1 = GAT(num_nodes, 20, hidden_channels, out_channels, heads, num_layers)
         self.gat_2 = GAT(num_nodes, 20, hidden_channels, out_channels, heads, num_layers)
 
-        self.linear_residual = nn.Linear(1, hidden_channels)
+        self.linear_residual = nn.Linear(in_channels, hidden_channels)  # changed this from self.linear_residual = nn.Linear(1, hidden_channels) TOdo ( check if needed)
 
         self.bn = nn.BatchNorm2d(num_nodes)
         self.fc = nn.Linear(self.num_nodes * (20 + 20), self.out_channels * 2048)
-        self.fc1 = nn.Linear(2048, 300)
+        self.fc1 = nn.Linear(2048, self.num_nodes) # changed this from self.fc1 = nn.Linear(2048, 300) Todo check if needed
 
     def forward(self, data) -> torch.FloatTensor:
         # 对残差进行处理
@@ -125,12 +125,17 @@ class GAT_TCN(nn.Module):
         # Apply linear layer to each time step of r
         r = self.linear_residual(r)
         r = F.relu(r)
-        r = F.dropout(r, p=0.5, training=self.training)
-
-        t = self.gat_1(data, 't')
-        t = t.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
-        s = self.gat_2(data, 's')
-        s = s.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
+        r = F.dropout(r, 0.5, training=self.training)
+        # Todo okay Idk what is happening here and why. but it seems like the second option does work and the other one does not at all.
+        # Todo maybe it is because the batch size is now 1??
+        # t = self.gat_1(data, 't')
+        # t = t.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
+        # s = self.gat_2(data, 's')
+        # s = s.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
+        # todo maybe this is better idk, need to check this, maybe not needed??
+        # # Graph features
+        t = self.gat_1(data, 't').unsqueeze(0).unsqueeze(1)  # [1, 1, num_nodes, hidden_channels]
+        s = self.gat_2(data, 's').unsqueeze(0).unsqueeze(1)
 
         fused_features_list = []
         for t_idx in range(r.size(1)):

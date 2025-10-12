@@ -9,10 +9,13 @@ from matplotlib import pyplot as plt
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import warnings
+
+from get_data_rsr import get_data_rsr
+
 warnings.filterwarnings("ignore")
 # from Agent_SL import GCN,SGFormer,TCN_Net
 from torch.utils.data import random_split
-from STGAT_tsd import GAT_TCN
+from STGAT import GAT_TCN
 from gen_data_tsd import gen_GNN_data
 # from gen_data import gen_GNN_data
 # from GAT import GAT_TCN
@@ -42,7 +45,17 @@ def fix_seed(seed):
 fix_seed(50)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = "cpu"
-Gdata_list, split, max_value, min_value = gen_GNN_data()
+Gdata_list, split, max_value, min_value = get_data_rsr()
+first_sample = Gdata_list[0]
+print("Data shapes:")
+print("x:", first_sample.x.shape)
+print("r:", first_sample.r.shape)
+print("t:", first_sample.t.shape)
+print("s:", first_sample.s.shape)
+
+num_nodes = first_sample.t.shape[0]      # number of stocks
+in_channels = first_sample.r.shape[1]    # number of features per node (OHLCV)
+print("Detected num_nodes:", num_nodes, "in_channels:", in_channels)
 
 data_set = Gdata_list
 dataset_size = len(data_set)
@@ -120,10 +133,10 @@ print("Test size:", len(test_dataset))
 # df.to_csv(output_file, index=False)
 #
 # print(f"Data written to {output_file}")
-train_batch = 16
-val_batch = 16
+train_batch = 1
+val_batch = 1
 
-K = 5
+K = 2
 kf = KFold(n_splits=K, shuffle=True, random_state=2)
 # in_channels = 288
 # Gout_put_channels = 128
@@ -139,8 +152,8 @@ aggregate = 'cat'
 lr = 1e-3
 ours_weight_decay = 5e-3
 weight_decay = 5e-3
-epochs = 100
-val_min_num = 50
+epochs = 20
+val_min_num = 10
 
 in_size = 30
 out_channels = 304
@@ -149,7 +162,17 @@ out_channels = 304
 # TCN = TCN_Net(in_size,hidden_channels,split)
 # gcn = GCN(in_channels,Ghidden_channels,Gout_put_channels).to(device)
 # model = SGFormer(in_channels, hidden_channels, out_channels, aggregate, gcn, TCN).to(device)
-gat = GAT_TCN(304, 1, 128, 1, 3, 2, 3)
+# gat = GAT_TCN(20, 1, 128, 1, 3, 2, 3)
+
+gat = GAT_TCN(
+    num_nodes=150,          # from print
+    in_channels=1,         # number of features per node
+    hidden_channels=128,
+    out_channels=1,
+    heads=3,
+    num_layers=2,
+    kernel_size=3
+)
 
 # optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.5)
 criterion_2 = nn.L1Loss()
@@ -187,7 +210,7 @@ def train():
         # out = model(data)*data.guiyi_std.unsqueeze(1)+data.mean_value.unsqueeze(1)
         # y = data.shouchujia.reshape(-1, 304)*data.guiyi_std.unsqueeze(1)+data.mean_value.unsqueeze(1)
         out = model(data)
-        y = data.shouchujia.reshape(-1, 300)
+        y = data.shouchujia.reshape(-1, num_nodes)
         loss = criterion(out, y)
         loss.backward()
         # if (step+1)% accumulation_steps == 0:
@@ -212,7 +235,7 @@ def validate(model_xc):
             # out = model(data) * data.guiyi_std.unsqueeze(1) + data.mean_value.unsqueeze(1)
             # y = data.shouchujia.reshape(-1, 304) * data.guiyi_std.unsqueeze(1) + data.mean_value.unsqueeze(1)
             out = model(data)
-            y = data.shouchujia.reshape(-1, 300)
+            y = data.shouchujia.reshape(-1, num_nodes)
             loss = criterion(out, y)
             L1loss = criterion_2(out, y)
             # total_loss += loss.item()
