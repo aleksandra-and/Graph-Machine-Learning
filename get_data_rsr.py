@@ -5,6 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import os
+import pickle
+from pathlib import Path
 
 from torch_geometric.data import Data
 import torch
@@ -13,8 +15,82 @@ import torch.optim as optim
 import torch.nn.functional as F
 from statsmodels.tsa.seasonal import STL
 
-def get_data_rsr():
+def export_preprocessed_data(data_list, num_features, export_path="preprocessed_data.pkl"):
+    """
+    Export preprocessed data to disk for faster loading
+    
+    Args:
+        data_list: List of Data objects
+        num_features: Number of features
+        export_path: Path to save the data
+    """
+    export_data = {
+        'data_list': data_list,
+        'num_features': num_features,
+        'metadata': {
+            'num_samples': len(data_list),
+            'num_companies': data_list[0].num_nodes if data_list else 0,
+            'window_size': data_list[0].x.shape[1] if data_list else 0
+        }
+    }
+    
+    with open(export_path, 'wb') as f:
+        pickle.dump(export_data, f)
+    
+    print(f"Preprocessed data exported to {export_path}")
+    print(f"Exported {len(data_list)} samples with {num_features} features")
 
+def load_preprocessed_data(export_path="preprocessed_data.pkl"):
+    """
+    Load preprocessed data from disk
+    
+    Args:
+        export_path: Path to the saved data
+        
+    Returns:
+        data_list, num_features, 0, 0 or None if file doesn't exist
+    """
+    if not os.path.exists(export_path):
+        print(f"No preprocessed data found at {export_path}")
+        return None
+    
+    try:
+        with open(export_path, 'rb') as f:
+            export_data = pickle.load(f)
+        
+        data_list = export_data['data_list']
+        num_features = export_data['num_features']
+        metadata = export_data.get('metadata', {})
+        
+        print(f"Loaded preprocessed data from {export_path}")
+        print(f"Loaded {len(data_list)} samples with {num_features} features")
+        print(f"Metadata: {metadata}")
+        
+        return data_list, num_features, 0, 0
+        
+    except Exception as e:
+        print(f"Error loading preprocessed data: {e}")
+        return None
+
+def get_data_rsr(export_path="preprocessed_data.pkl", force_reprocess=False):
+    """
+    Get RSR data, either by loading from disk or preprocessing from scratch
+    
+    Args:
+        export_path: Path to save/load preprocessed data
+        force_reprocess: If True, always reprocess data even if preprocessed version exists
+        
+    Returns:
+        data_list, num_features, 0, 0
+    """
+    
+    # Try to load preprocessed data first (unless force_reprocess is True)
+    if not force_reprocess:
+        preprocessed_data = load_preprocessed_data(export_path)
+        if preprocessed_data is not None:
+            return preprocessed_data
+    
+    print("Preprocessing data from scratch...")
     dir = '/home/study/IdeaProjects/Graph-Machine-Learning/Temporal_RSR/data'
 
     """
@@ -104,6 +180,45 @@ def get_data_rsr():
     industry_mask = industry_mask[:n_companies, :n_companies]
 
     eod_data, eod_masks, eod_ground_truth, eod_base_price = load_EOD_data(dir+"/2013-01-01", "NASDAQ", tickers[:n_companies])
+    
+    # Pre-compute STL decomposition for complete time series per company
+    print("Computing STL decomposition for complete time series...")
+    
+    # Extract complete time series for each company (all days) - closing prices
+    complete_sequences = eod_data[:, :, -1]  # [num_companies, num_days] - close prices
+    
+    # Initialize arrays to store STL results for all companies
+    num_days = complete_sequences.shape[1]
+    complete_t_features = np.zeros((n_companies, num_days))
+    complete_s_features = np.zeros((n_companies, num_days))
+    complete_r_features = np.zeros((n_companies, num_days))
+    
+    # Apply STL to each company's complete time series
+    for company_idx in range(n_companies):
+        if company_idx % 25 == 0:
+            print(f"Processing STL for company {company_idx}/{n_companies}")
+        
+        # Extract complete 1D time series for this company: [num_days]
+        company_series = complete_sequences[company_idx, :]  # [num_days]
+        
+        # Apply STL decomposition to complete time series
+        stl = STL(company_series, period=20, robust=True)
+        result = stl.fit()
+        
+        # Store results for complete time series
+        complete_t_features[company_idx] = result.trend
+        complete_s_features[company_idx] = result.seasonal
+        complete_r_features[company_idx] = result.resid
+    
+    print("STL decomposition completed.")
+    
+    # Create STL data dictionary
+    stl_data = {
+        'trend': complete_t_features,
+        'seasonal': complete_s_features,
+        'residual': complete_r_features
+    }
+    
     # ============================================================================
     # Data Preparation Functions
     # ============================================================================
@@ -139,7 +254,7 @@ def get_data_rsr():
         return adjacency_matrix.to(device)
 
 
-    def prepare_data(eod_data, masks, base_price, device, window_size=20, prediction_horizon=1):
+    def prepare_data(eod_data, masks, base_price, stl_data, device, window_size=20, prediction_horizon=1):
         """
         Create sliding windows for time series prediction with mask handling
 
@@ -147,6 +262,7 @@ def get_data_rsr():
             eod_data: [num_companies, num_days, num_features]
             masks: [num_companies, num_days] - 1.0 for valid, 0.0 for missing
             base_price: [num_companies, num_days] - closing price of stock
+            stl_data: dict with keys 'trend', 'seasonal', 'residual' containing [num_companies, num_days] arrays
             window_size: Number of historical days to use as input
             prediction_horizon: Number of days ahead to predict (usually 1)
 
@@ -154,6 +270,9 @@ def get_data_rsr():
             X: Input windows [num_samples, num_companies, window_size, num_features]
             y: Target returns [num_samples, num_companies, prediction_horizon]
             sample_masks: Valid sample indicators [num_samples, num_companies]
+            t_features: Trend components [num_samples, num_companies, window_size]
+            s_features: Seasonal components [num_samples, num_companies, window_size]
+            r_features: Residual components [num_samples, num_companies, window_size]
         """
         num_companies, num_days, num_features = eod_data.shape
         num_samples = num_days - window_size - prediction_horizon + 1
@@ -161,17 +280,27 @@ def get_data_rsr():
         X = torch.zeros(num_samples, num_companies, window_size, num_features, device=device)
         y = torch.zeros(num_samples, num_companies, prediction_horizon, device=device)
         sample_masks = torch.zeros(num_samples, num_companies, device=device)
+        
+        # Initialize STL component arrays
+        t_features = torch.zeros(num_samples, num_companies, window_size, device=device)
+        s_features = torch.zeros(num_samples, num_companies, window_size, device=device)
+        r_features = torch.zeros(num_samples, num_companies, window_size, device=device)
 
         for i in range(num_samples):
             X[i] = eod_data[:, i:i+window_size, :]
             y[i, :, 0] = base_price[:, i+window_size+prediction_horizon-1]
+            
+            # Extract STL components for this window
+            t_features[i] = torch.tensor(stl_data['trend'][:, i:i+window_size], dtype=torch.float32, device=device)
+            s_features[i] = torch.tensor(stl_data['seasonal'][:, i:i+window_size], dtype=torch.float32, device=device)
+            r_features[i] = torch.tensor(stl_data['residual'][:, i:i+window_size], dtype=torch.float32, device=device)
 
             # A sample is valid if all days in the window AND the target day are valid
             window_valid = masks[:, i:i+window_size].min(dim=1)[0]  # [num_companies]
             target_valid = masks[:, i+window_size+prediction_horizon-1]
             sample_masks[i] = window_valid * target_valid
 
-        return X, y, sample_masks
+        return X, y, sample_masks, t_features, s_features, r_features
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Using device:", device)
@@ -205,9 +334,9 @@ def get_data_rsr():
     print(f"Adjacency matrix shape: {adjacency_matrix.shape}")
 
     # Prepare temporal data with masks
-    window_size = 20  # Use window_size days of history
-    X_train, y_train, train_masks = prepare_data(
-        eod_data, masks, price_prediction,
+    window_size = 20  # Use window_size days of history,  20 days (closing price), 21 day predict target
+    X_train, y_train, train_masks, t_train, s_train, r_train = prepare_data(
+        eod_data, masks, price_prediction, stl_data,
         window_size=window_size,
         device=device,
         prediction_horizon=1
@@ -215,9 +344,7 @@ def get_data_rsr():
     print(f"Training data: X={X_train.shape}, y={y_train.shape}, masks={train_masks.shape}")
     # num of days x
 
-
     #Convert to STGAT format
-
 
     def adjacency_to_edges(adjacency_matrix):
         """Convert adjacency matrix to edge_index and edge_weight"""
@@ -227,6 +354,7 @@ def get_data_rsr():
         edge_index = torch.tensor(np.stack([rows, cols]), dtype=torch.long) # todo check if this is the formatting that is needed
         edge_weight = torch.tensor(edge_weights, dtype=torch.float32).view(-1, 1) # todo check if this is correctly formatted for the model
         return edge_index, edge_weight
+    # [[1,2], [3,6], [] ]
 
     # Convert adjacency matrix to edge representation
     edge_index, edge_weight = adjacency_to_edges(adjacency_matrix) # Todo I think STGAT does calculate graph per window, but idk how that works here or what we should do with that
@@ -239,35 +367,14 @@ def get_data_rsr():
 
     for i in range(num_samples):
         # Get sequence for this sample: [num_companies, window_size, num_features]
-        sequence = X_train[i][:, :, -1:]  # [150, 20, 1]
+        sequence = X_train[i][:, :, -1:]  # [150, 20, 1] close price
         target = y_train[i]  # [150, 1]
         mask = train_masks[i]  # [150] # todo we still need to use the mask and add it to the data object and change the loss function
 
-        sequence_cpu = sequence.cpu().numpy()
-
-        # Initialize arrays to store STL results for all companies
-        t_features = np.zeros((num_companies, window_size))
-        s_features = np.zeros((num_companies, window_size))
-        r_features = np.zeros((num_companies, window_size))
-
-        # Apply STL to each company's time series separately
-        for company_idx in range(num_companies):
-            # Extract 1D time series for this company: [window_size]
-            company_series = sequence_cpu[company_idx, :, 0]  # [20]
-
-            # Apply STL decomposition
-            stl = STL(company_series, period=20, robust=True)
-            result = stl.fit()
-
-            # Store results
-            t_features[company_idx] = result.trend
-            s_features[company_idx] = result.seasonal
-            r_features[company_idx] = result.resid
-
-        # Convert back to tensors
-        t_features = torch.tensor(t_features, dtype=torch.float32)
-        s_features = torch.tensor(s_features, dtype=torch.float32)
-        r_features = torch.tensor(r_features, dtype=torch.float32)
+        # Use pre-computed STL components
+        t_features = t_train[i]  # [num_companies, window_size]
+        s_features = s_train[i]  # [num_companies, window_size]
+        r_features = r_train[i]  # [num_companies, window_size]
 
         # Todo check this part, idk what the x features should be , for now i use the s features
         x_features = s_features
@@ -281,10 +388,14 @@ def get_data_rsr():
             edge_index=edge_index.to(device),
             edge_weight=edge_weight.to(device),
             shouchujia=target.squeeze().float(),
+            train_mask=mask
         )
 
         data.num_nodes = num_companies
         data_list.append(data)
+        
+        if i % 100 == 0:
+            print(f"Created data sample {i}/{num_samples}")
 
     print(f"\nGenerated {len(data_list)} samples")
     print(f"First sample shapes:")
@@ -295,5 +406,8 @@ def get_data_rsr():
     print(f"  edge_index: {data_list[0].edge_index.shape}")
     print(f"  edge_weight: {data_list[0].edge_weight.shape}")
     print(f"  shouchujia: {data_list[0].shouchujia.shape}")
+
+    # Export the preprocessed data for future use
+    # export_preprocessed_data(data_list, num_features, export_path)
 
     return data_list, num_features, 0, 0

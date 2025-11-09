@@ -128,14 +128,14 @@ class GAT_TCN(nn.Module):
         r = F.dropout(r, 0.5, training=self.training)
         # Todo okay Idk what is happening here and why. but it seems like the second option does work and the other one does not at all.
         # Todo maybe it is because the batch size is now 1??
-        # t = self.gat_1(data, 't')
-        # t = t.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
-        # s = self.gat_2(data, 's')
-        # s = s.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
+        t = self.gat_1(data, 't')
+        t = t.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
+        s = self.gat_2(data, 's')
+        s = s.permute(1, 0).reshape(-1, 1, self.num_nodes, self.hidden_channels)
         # todo maybe this is better idk, need to check this, maybe not needed??
         # # Graph features
-        t = self.gat_1(data, 't').unsqueeze(0).unsqueeze(1)  # [1, 1, num_nodes, hidden_channels]
-        s = self.gat_2(data, 's').unsqueeze(0).unsqueeze(1)
+        # t = self.gat_1(data, 't').unsqueeze(0).unsqueeze(1)  # [1, 1, num_nodes, hidden_channels]
+        # s = self.gat_2(data, 's').unsqueeze(0).unsqueeze(1)
 
         fused_features_list = []
         for t_idx in range(r.size(1)):

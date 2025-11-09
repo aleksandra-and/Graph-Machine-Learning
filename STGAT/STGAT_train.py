@@ -51,6 +51,7 @@ print("x:", first_sample.x.shape)
 print("r:", first_sample.r.shape)
 print("t:", first_sample.t.shape)
 print("s:", first_sample.s.shape)
+print("train_mask:", first_sample.train_mask.shape)
 
 num_nodes = first_sample.t.shape[0]      # number of stocks
 in_channels = first_sample.r.shape[1]    # number of features per node (OHLCV)
@@ -132,8 +133,8 @@ print("Test size:", len(test_dataset))
 # df.to_csv(output_file, index=False)
 #
 # print(f"Data written to {output_file}")
-train_batch = 1
-val_batch = 1
+train_batch = 2
+val_batch = 2
 
 K = 2
 kf = KFold(n_splits=K, shuffle=True, random_state=2)
@@ -174,8 +175,8 @@ gat = GAT_TCN(
 )
 
 # optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.5)
-criterion_2 = nn.L1Loss()
-criterion = torch.nn.MSELoss()
+criterion_2 = nn.L1Loss(reduction='none')
+criterion = torch.nn.MSELoss(reduction='none')
 # criterion = criterion_2
 # optimizer = torch.optim.Adam([
 #     {'params': model.params1},
@@ -210,12 +211,20 @@ def train():
         # y = data.shouchujia.reshape(-1, 304)*data.guiyi_std.unsqueeze(1)+data.mean_value.unsqueeze(1)
         out = model(data)
         y = data.shouchujia.reshape(-1, num_nodes)
+        train_mask = data.train_mask.reshape(-1, num_nodes)
         loss = criterion(out, y)
+        loss = loss * train_mask # apply mask # todo check masking and why only the l1loss is in the total and backward only on the loss of criterion?
+        num_valid = train_mask.sum() + 1e-8
+        loss = loss.sum() / num_valid
+
+        # loss_per_sample = criterion(out, y)
         loss.backward()
         # if (step+1)% accumulation_steps == 0:
 
         optimizer.step()
         L1loss = criterion_2(out, y)
+        L1loss = L1loss * train_mask # apply mask
+        L1loss = L1loss.sum() / num_valid
         # total_loss += loss.item()
         total_loss += L1loss.item()
     return total_loss / len(train_loader)
@@ -235,10 +244,16 @@ def validate(model_xc):
             # y = data.shouchujia.reshape(-1, 304) * data.guiyi_std.unsqueeze(1) + data.mean_value.unsqueeze(1)
             out = model(data)
             y = data.shouchujia.reshape(-1, num_nodes)
+            train_mask = data.train_mask.reshape(-1, num_nodes)
             loss = criterion(out, y)
+            loss = loss * train_mask # apply mask
+            num_valid = train_mask.sum() + 1e-8
+            loss = loss.sum() / num_valid
             L1loss = criterion_2(out, y)
+            L1loss = L1loss * train_mask # apply mask
+            L1loss = L1loss.sum() / num_valid
             # total_loss += loss.item()
-            total_loss += L1loss.item()
+            total_loss += L1loss.item() # todo check these losses like why only l1 loss?
             all_predictions.extend(out.cpu().numpy().tolist()) # 保存预测值
             all_targets.extend(y.cpu().numpy().tolist())       # 保存真实值
 
